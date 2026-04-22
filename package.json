@@ -1,36 +1,25 @@
 {
-  "name": "titanbot-custom",
-  "version": "2.0.0",
-  "description": "Modular Ultimate Community Bot by Touchpoint Support",
-  "main": "src/app.js",
-  "type": "module",
+  "name": "anti-nuke-discord-bot",
+  "version": "1.0.0",
+  "description": "Anti-Nuke, Anti-Raid Discord Bot with Dashboard",
+  "main": "index.js",
   "scripts": {
-    "start": "node src/app.js",
-    "test": "node --test tests/**/*.test.js",
-    "migrate": "node scripts/migrate.js apply",
-    "migrate:check": "node scripts/migrate.js check",
-    "migrate:status": "node scripts/migrate.js status",
-    "backup:db": "node scripts/backup.js",
-    "restore:db": "node scripts/restore.js",
-    "backup:drill": "node scripts/restore-drill.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
-    "axios": "^1.13.2",
-    "discord.js": "^14.15.3",
-    "dotenv": "^17.2.3",
-    "express": "^5.1.0",
-    "node-cron": "^4.2.1",
-    "pg": "^8.11.3",
-    "web-streams-polyfill": "^3.3.3",
-    "winston": "^3.19.0",
-    "winston-daily-rotate-file": "^5.0.0",
-    "zod": "^3.25.76"
-  },
-  "devDependencies": {},
-  "overrides": {
-    "undici": "^6.23.0"
+    "discord.js": "^14.14.1",
+    "mongoose": "^8.2.1",
+    "express": "^4.18.2",
+    "express-session": "^1.18.0",
+    "passport": "^0.7.0",
+    "passport-discord": "^0.1.4",
+    "dotenv": "^16.4.5"
   },
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "keywords": ["discord", "bot", "anti-nuke", "anti-raid"],
+  "author": "YourName",
+  "license": "MIT"
 }
