@@ -1,3 +1,287 @@
+// =====================
+// IMPORTS
+// =====================
+require('dotenv').config();
+const { Client, GatewayIntentBits, AuditLogEvent, PermissionsBitField, REST, Routes } = require('discord.js');
+const mongoose = require('mongoose');
+const express = require('express');
+const session = require('express-session');
+const passport = require('passport');
+const DiscordStrategy = require('passport-discord').Strategy;
+
+// =====================
+// CONFIG
+// =====================
+const PREFIX = process.env.PREFIX || "$";
+
+// =====================
+// DATABASE
+// =====================
+mongoose.connect(process.env.MONGO_URI)
+.then(()=>console.log("MongoDB Connected"))
+.catch(err=>console.log(err));
+
+const guildSchema = new mongoose.Schema({
+  guildId: String,
+  whitelist: { type: [String], default: [] },
+  ownerWhitelist: { type: [String], default: [] },
+  logs: String,
+  premium: {
+    enabled: Boolean,
+    expires: Number
+  },
+  raid: {
+    joins: { type: Number, default: 0 },
+    lastJoin: Number
+  }
+});
+
+const Guild = mongoose.model("Guild", guildSchema);
+
+// =====================
+// BOT SETUP
+// =====================
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages
+  ]
+});
+
+// =====================
+// DASHBOARD (OAuth)
+// =====================
+const app = express();
+
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false
+}));
+
+app.use(passport.initialize());
+app.use(passport.session());
+
+passport.serializeUser((u, done)=>done(null,u));
+passport.deserializeUser((obj, done)=>done(null,obj));
+
+passport.use(new DiscordStrategy({
+  clientID: process.env.CLIENT_ID,
+  clientSecret: process.env.CLIENT_SECRET,
+  callbackURL: "/callback",
+  scope: ["identify","guilds"]
+},
+(accessToken, refreshToken, profile, done)=>{
+  return done(null, profile);
+}));
+
+app.get("/", (req,res)=>{
+  res.send(`<a href="/login">Login with Discord</a>`);
+});
+
+app.get("/login", passport.authenticate("discord"));
+
+app.get("/callback",
+  passport.authenticate("discord", { failureRedirect: "/" }),
+  (req,res)=> res.send(`Logged in as ${req.user.username}`)
+);
+
+// =====================
+// HELPER FUNCTIONS
+// =====================
+async function punish(member) {
+  try {
+    await member.roles.set([]);
+  } catch {}
+}
+
+async function isWhitelisted(guildId, userId) {
+  const data = await Guild.findOne({ guildId });
+  if (!data) return false;
+  return data.whitelist.includes(userId) || data.ownerWhitelist.includes(userId);
+}
+
+// =====================
+// RAID DETECTION
+// =====================
+client.on("guildMemberAdd", async member => {
+  const data = await Guild.findOneAndUpdate(
+    { guildId: member.guild.id },
+    { $inc: { "raid.joins": 1 }, $set: { "raid.lastJoin": Date.now() } },
+    { upsert: true, new: true }
+  );
+
+  if (data.raid.joins > 5) {
+    member.guild.channels.cache.forEach(c => {
+      c.permissionOverwrites.edit(member.guild.roles.everyone, {
+        SendMessages: false
+      }).catch(()=>{});
+    });
+  }
+
+  setTimeout(async ()=>{
+    const reset = await Guild.findOne({ guildId: member.guild.id });
+    if (reset) {
+      reset.raid.joins = 0;
+      await reset.save();
+    }
+  }, 10000);
+});
+
+// =====================
+// ANTI NUKE EVENTS
+// =====================
+async function checkAudit(guild, type) {
+  const logs = await guild.fetchAuditLogs({ type, limit: 1 });
+  return logs.entries.first();
+}
+
+// Channel Delete
+client.on("channelDelete", async channel => {
+  const entry = await checkAudit(channel.guild, AuditLogEvent.ChannelDelete);
+  if (!entry) return;
+
+  const user = entry.executor;
+  if (await isWhitelisted(channel.guild.id, user.id)) return;
+
+  const member = await channel.guild.members.fetch(user.id);
+  punish(member);
+
+  // recovery
+  channel.guild.channels.create({
+    name: channel.name,
+    type: channel.type
+  });
+});
+
+// Role Delete
+client.on("roleDelete", async role => {
+  const entry = await checkAudit(role.guild, AuditLogEvent.RoleDelete);
+  if (!entry) return;
+
+  const user = entry.executor;
+  if (await isWhitelisted(role.guild.id, user.id)) return;
+
+  const member = await role.guild.members.fetch(user.id);
+  punish(member);
+
+  role.guild.roles.create({
+    name: role.name,
+    permissions: role.permissions
+  });
+});
+
+// Bot Add
+client.on("guildMemberAdd", async member => {
+  if (!member.user.bot) return;
+
+  const entry = await checkAudit(member.guild, AuditLogEvent.BotAdd);
+  if (!entry) return;
+
+  const user = entry.executor;
+  if (await isWhitelisted(member.guild.id, user.id)) return;
+
+  await member.kick();
+});
+
+// =====================
+// COMMAND HANDLER
+// =====================
+client.on("messageCreate", async message => {
+  if (!message.content.startsWith(PREFIX) || message.author.bot) return;
+
+  const args = message.content.slice(PREFIX.length).trim().split(/ +/);
+  const cmd = args.shift().toLowerCase();
+
+  // WHITELIST
+  if (cmd === "wl") {
+    const user = message.mentions.users.first();
+    if (!user) return message.reply("Mention user");
+
+    await Guild.findOneAndUpdate(
+      { guildId: message.guild.id },
+      { $addToSet: { whitelist: user.id } },
+      { upsert: true }
+    );
+
+    message.reply("User whitelisted");
+  }
+
+  // LOG CHANNEL
+  if (cmd === "setlogs") {
+    await Guild.findOneAndUpdate(
+      { guildId: message.guild.id },
+      { logs: message.channel.id },
+      { upsert: true }
+    );
+
+    message.reply("Logs set");
+  }
+
+  // PREMIUM
+  if (cmd === "addpremium") {
+    const days = parseInt(args[0]) || 30;
+
+    await Guild.findOneAndUpdate(
+      { guildId: message.guild.id },
+      {
+        premium: {
+          enabled: true,
+          expires: Date.now() + days * 86400000
+        }
+      },
+      { upsert: true }
+    );
+
+    message.reply("Premium activated");
+  }
+});
+
+// =====================
+// SLASH COMMANDS
+// =====================
+const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+
+(async () => {
+  await rest.put(
+    Routes.applicationCommands(process.env.CLIENT_ID),
+    {
+      body: [
+        { name: "ping", description: "Ping test" },
+        { name: "lockdown", description: "Lock server" }
+      ]
+    }
+  );
+})();
+
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === "ping") {
+    return interaction.reply("Pong!");
+  }
+
+  if (interaction.commandName === "lockdown") {
+    interaction.guild.channels.cache.forEach(c => {
+      c.permissionOverwrites.edit(interaction.guild.roles.everyone, {
+        SendMessages: false
+      }).catch(()=>{});
+    });
+
+    interaction.reply("Server locked");
+  }
+});
+
+// =====================
+// START EVERYTHING
+// =====================
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, ()=>console.log("Dashboard running"));
+client.login(process.env.TOKEN);
+
+
 import pg from 'pg';
 import dotenv from 'dotenv';
 import path from 'path';
